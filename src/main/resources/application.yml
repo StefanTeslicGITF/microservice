@@ -1,0 +1,28 @@
+rabbitmq:
+  host: localhost
+  port: 5672
+  username: guest
+  password: guest
+  queue: dataset-processing
+  exchange: dataset-exchange
+  routing-key: dataset.process
+
+processing:
+  concurrency: 10
+  batch-size: 100
+  retry:
+    attempts: 3
+    backoff-seconds: 1
+    max-backoff-seconds: 10
+  timeout-seconds: 300
+
+dataset:
+  chunk-size: 1000
+  max-memory-mb: 512
+  output-format: json
+
+logging:
+  level: INFO
+  file: logs/processor.log
+
+aa: cao
