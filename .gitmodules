@@ -1,0 +1,3 @@
+[submodule "microservicedtos"]
+	path = microservicedtos
+	url = https://github.com/StefanTeslicGITF/microservicedtos
