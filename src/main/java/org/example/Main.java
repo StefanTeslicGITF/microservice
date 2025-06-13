@@ -2,20 +2,26 @@ package org.example;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
+import com.globalitfactory.api.v1.service.rabbitMQ.QueuePayload;
 import com.rabbitmq.client.*;
+import lombok.Data;
+import lombok.Getter;
+import lombok.extern.slf4j.Slf4j;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import reactor.core.publisher.Flux;
-import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Schedulers;
-import reactor.util.retry.Retry;
 
+import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
-import java.nio.charset.StandardCharsets;
-import java.time.Duration;
+import java.io.ObjectInputStream;
 import java.util.Map;
 import java.util.concurrent.TimeoutException;
 
+@Slf4j
 public class Main {
+    private static final Logger log = LoggerFactory.getLogger(Main.class);
     private static AppConfig config;
 
     public static void main(String[] args) throws Exception {
@@ -36,7 +42,7 @@ public class Main {
         public int port = 5672;
         public String username = "guest";
         public String password = "guest";
-        public String queue = "dataset-processing";
+        public String queue = "test-queue";
     }
 
     private static class ProcessingConfig {
@@ -72,24 +78,21 @@ public class Main {
 
         System.out.println("Configuration loaded - Queue: " + config.rabbitmq.queue +
                 ", Concurrency: " + config.processing.concurrency);
-        System.out.println("Test value 'aa': " + config.aa);
     }
 
     @SuppressWarnings("unchecked")
     private static AppConfig parseConfig(Map<String, Object> yamlMap) {
         AppConfig appConfig = new AppConfig();
 
-        // Parse RabbitMQ config
         Map<String, Object> rabbitmqMap = (Map<String, Object>) yamlMap.get("rabbitmq");
         if (rabbitmqMap != null) {
             appConfig.rabbitmq.host = (String) rabbitmqMap.getOrDefault("host", "localhost");
             appConfig.rabbitmq.port = (Integer) rabbitmqMap.getOrDefault("port", 5672);
-            appConfig.rabbitmq.queue = (String) rabbitmqMap.getOrDefault("queue", "dataset-processing");
+            appConfig.rabbitmq.queue = (String) rabbitmqMap.getOrDefault("queue", "test-queue");
             appConfig.rabbitmq.username = (String) rabbitmqMap.getOrDefault("username", "guest");
             appConfig.rabbitmq.password = (String) rabbitmqMap.getOrDefault("password", "guest");
         }
 
-        // Parse Processing config
         Map<String, Object> processingMap = (Map<String, Object>) yamlMap.get("processing");
         if (processingMap != null) {
             appConfig.processing.concurrency = (Integer) processingMap.getOrDefault("concurrency", 10);
@@ -104,14 +107,12 @@ public class Main {
             }
         }
 
-        // Parse Dataset config
         Map<String, Object> datasetMap = (Map<String, Object>) yamlMap.get("dataset");
         if (datasetMap != null) {
             appConfig.dataset.chunkSize = (Integer) datasetMap.getOrDefault("chunk-size", 1000);
             appConfig.dataset.maxMemoryMb = (Integer) datasetMap.getOrDefault("max-memory-mb", 512);
         }
 
-        // Parse simple properties
         appConfig.aa = (String) yamlMap.getOrDefault("aa", "default");
 
         return appConfig;
@@ -128,21 +129,26 @@ public class Main {
         Connection connection = factory.newConnection();
         Channel channel = connection.createChannel();
 
-        // Declare queue with durability for large dataset processing
-        channel.queueDeclare(config.rabbitmq.queue, true, false, false, null);
-        channel.basicQos(config.processing.concurrency); // Prefetch count for backpressure
+        channel.queueDeclare(config.rabbitmq.queue, false, false, false, null);
+        channel.basicQos(config.processing.concurrency);
 
-        System.out.println("Starting reactive dataset processing service...");
-
-        // Create reactive stream from RabbitMQ messages
         Flux.<DatasetMessage>create(sink -> {
             try {
                 DeliverCallback deliverCallback = (consumerTag, delivery) -> {
                     try {
-                        String messageBody = new String(delivery.getBody(), StandardCharsets.UTF_8);
+                        byte[] body = delivery.getBody();
+                        QueuePayload dto = null;
+                        try (ByteArrayInputStream bais = new ByteArrayInputStream(body);
+                             ObjectInputStream ois = new ObjectInputStream(bais)) {
+
+                            dto = (QueuePayload) ois.readObject();
+                        } catch (IOException | ClassNotFoundException e) {
+                            log.info("error ");
+                        }
+
                         DatasetMessage message = new DatasetMessage(
                                 delivery.getEnvelope().getDeliveryTag(),
-                                messageBody,
+                                dto,
                                 channel
                         );
                         sink.next(message);
@@ -160,9 +166,23 @@ public class Main {
             } catch (IOException e) {
                 sink.error(e);
             }
-        });
+        }).subscribeOn(Schedulers.boundedElastic())
+                .subscribe(msg -> {
+                    try {
+                        log.info("Processing message: {}", msg.getBody());
 
-        // Graceful shutdown hook
+
+                        msg.getChannel().basicAck(msg.getDeliveryTag(), false);
+                    } catch (Exception e) {
+                        log.error("Error processing message", e);
+                        try {
+                            msg.getChannel().basicNack(msg.getDeliveryTag(), false, true); // requeue = true
+                        } catch (IOException ioException) {
+                            log.error("Failed to nack message", ioException);
+                        }
+                    }
+                });;
+
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             System.out.println("Shutting down processing service...");
             try {
@@ -173,25 +193,21 @@ public class Main {
             }
         }));
 
-        // Keep application running
         Thread.currentThread().join();
     }
 }
-
-
-// Data class for messages
 class DatasetMessage {
     private final long deliveryTag;
-    private final String body;
+    private final QueuePayload body;
     private final Channel channel;
 
-    public DatasetMessage(long deliveryTag, String body, Channel channel) {
+    public DatasetMessage(long deliveryTag, QueuePayload body, Channel channel) {
         this.deliveryTag = deliveryTag;
         this.body = body;
         this.channel = channel;
     }
 
     public long getDeliveryTag() { return deliveryTag; }
-    public String getBody() { return body; }
+    public QueuePayload getBody() { return body; }
     public Channel getChannel() { return channel; }
 }

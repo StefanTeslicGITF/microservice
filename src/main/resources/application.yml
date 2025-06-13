@@ -3,7 +3,7 @@ rabbitmq:
   port: 5672
   username: guest
   password: guest
-  queue: dataset-processing
+  queue: test-queue
   exchange: dataset-exchange
   routing-key: dataset.process
 
@@ -24,5 +24,3 @@ dataset:
 logging:
   level: INFO
   file: logs/processor.log
-
-aa: cao
